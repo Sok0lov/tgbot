@@ -13,6 +13,50 @@ TOKEN = "7934568684:AAHsKoficbDtOhA3oYjveRozQPoItFlqYRk"
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# FSM-состояние для ввода ника
+class Registration(StatesGroup):
+    enter_fa_username = State()
+
+# Команда /start (проверка регистрации)
+@dp.message(Command("start"))
+async def start(message: types.Message, state: FSMContext):
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+
+    # Проверяем, есть ли пользователь в БД
+    cursor.execute("SELECT fa_username FROM users WHERE telegram_id = ?", (message.from_user.id,))
+    user = cursor.fetchone()
+
+    if not user or not user[0]:  # Если пользователя нет или нет ника FA
+        await message.answer("Привет! Введи свой ник на FurAffinity:")
+        await state.set_state(Registration.enter_fa_username)
+    else:
+        await message.answer("Вы уже зарегистрированы! Используйте /profile для управления профилем.")
+
+    conn.close()
+
+# Обработчик ввода ника FA
+@dp.message(Registration.enter_fa_username)
+async def enter_fa_username(message: types.Message, state: FSMContext):
+    fa_username = message.text.strip()
+    fa_link = f"https://www.furaffinity.net/user/{fa_username}"
+
+    # Сохраняем в БД
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "INSERT INTO users (telegram_id, username, fa_username, fa_link) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(telegram_id) DO UPDATE SET fa_username = ?, fa_link = ?",
+        (message.from_user.id, message.from_user.username, fa_username, fa_link, fa_username, fa_link)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await state.clear()  # Сбрасываем состояние
+    await message.answer(f"✅ Ник зарегистрирован: **{fa_username}**\n🔗 Ваша страница: [FurAffinity]({fa_link})", parse_mode="Markdown")
+
 # Определяем состояния для FSM
 class ProfileEdit(StatesGroup):
     edit_name = State()
@@ -110,12 +154,31 @@ def get_last_activity_days(user_id):
 # Команда /profile
 @dp.message(Command("profile"))
 async def profile(message: types.Message):
+    update_last_activity(message.from_user.id)
+
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT fa_username FROM users WHERE telegram_id = ?", (message.from_user.id,))
+    user = cursor.fetchone()
+    
+    if user and user[0]:
+        fa_username = user[0]
+        fa_link = f"https://www.furaffinity.net/user/{fa_username}"
+    else:
+        fa_username = "Не указан"
+        fa_link = "Не указана"
+    
+    profile_info = f"🦊 **{fa_username}**\n🔗 [Ссылка на профиль]({fa_link})\n📅 **Последняя активность**: {get_last_activity_days(message.from_user.id)}\n"
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="edit_name")],
         [InlineKeyboardButton(text="🔗 Изменить ссылку на FA", callback_data="edit_fa_link")],
         [InlineKeyboardButton(text="🎨 Указать тип контента", callback_data="edit_content_type")]
     ])
-    await message.answer("Личный кабинет. Выберите действие:", reply_markup=keyboard)
+
+    await message.answer(profile_info, reply_markup=keyboard, parse_mode="Markdown")
+    conn.close()
 
 # Обработка нажатий на кнопки
 @dp.callback_query(F.data == "edit_name")
@@ -211,28 +274,7 @@ def get_last_activity_days(user_id):
         return f"{days_ago} дн. назад" if days_ago > 0 else "Сегодня"
     return "Нет данных"
 
-# Команда /profile
-@dp.message(Command("profile"))
-async def profile(message: types.Message):
-    update_last_activity(message.from_user.id)
 
-    conn = sqlite3.connect("bot.db")
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT fa_username FROM users WHERE telegram_id = ?", (message.from_user.id,))
-    user = cursor.fetchone()
-    
-    profile_info = f"🦊 **Профиль**: {user[0] if user and user[0] else 'Не указан'}\n"
-    profile_info += f"📅 **Последняя активность**: {get_last_activity_days(message.from_user.id)}\n\n"
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="edit_name")],
-        [InlineKeyboardButton(text="🔗 Изменить ссылку на FA", callback_data="edit_fa_link")],
-        [InlineKeyboardButton(text="🎨 Указать тип контента", callback_data="edit_content_type")]
-    ])
-
-    await message.answer(profile_info, reply_markup=keyboard)
-    conn.close()
 
 # Запуск бота
 async def main():
