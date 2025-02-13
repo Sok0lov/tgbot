@@ -1,6 +1,7 @@
 import sqlite3
 import logging
 import asyncio
+import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -22,15 +23,20 @@ class ProfileEdit(StatesGroup):
 def init_db():
     conn = sqlite3.connect("bot.db")
     cursor = conn.cursor()
+
+    # Создание таблицы пользователей
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         telegram_id INTEGER UNIQUE,
         username TEXT,
         fa_username TEXT UNIQUE,
-        fa_link TEXT
+        fa_link TEXT,
+        last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
+
+    # Создание таблицы профилей
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS user_profile (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +46,7 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES users (telegram_id)
     )
     ''')
+
     conn.commit()
     conn.close()
 
@@ -62,6 +69,43 @@ async def start(message: types.Message):
         await message.answer("Вы уже зарегистрированы! Используйте /profile для управления профилем.")
 
     conn.close()
+
+# Обновляем время последней активности пользователя
+def update_last_activity(user_id):
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    
+    # Проверяем, есть ли колонка last_activity в таблице users
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    if "last_activity" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+    # Обновляем время последней активности
+    cursor.execute(
+        "UPDATE users SET last_activity = CURRENT_TIMESTAMP WHERE telegram_id = ?",
+        (user_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+# Вычисление дней с последней активности
+def get_last_activity_days(user_id):
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT last_activity FROM users WHERE telegram_id = ?", (user_id,)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result and result[0]:
+        last_activity = datetime.datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
+        days_ago = (datetime.datetime.now() - last_activity).days
+        return f"{days_ago} дн. назад" if days_ago > 0 else "Сегодня"
+    return "Нет данных"
 
 # Команда /profile
 @dp.message(Command("profile"))
@@ -97,10 +141,7 @@ async def edit_content_type(callback: types.CallbackQuery, state: FSMContext):
 async def handle_name_input(message: types.Message, state: FSMContext):
     conn = sqlite3.connect("bot.db")
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO user_profile (user_id, name) VALUES (?, ?)",
-        (message.from_user.id, message.text)
-    )
+    cursor.execute("INSERT OR REPLACE INTO user_profile (user_id, name) VALUES (?, ?)",(message.from_user.id, message.text))
     conn.commit()
     conn.close()
     await state.clear()
@@ -110,10 +151,7 @@ async def handle_name_input(message: types.Message, state: FSMContext):
 async def handle_fa_link_input(message: types.Message, state: FSMContext):
     conn = sqlite3.connect("bot.db")
     cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE users SET fa_link = ? WHERE telegram_id = ?",
-        (message.text, message.from_user.id)
-    )
+    cursor.execute("UPDATE users SET fa_link = ? WHERE telegram_id = ?",(message.text, message.from_user.id))
     conn.commit()
     conn.close()
     await state.clear()
@@ -149,7 +187,53 @@ async def menu(message: types.Message):
 async def profile_button(message: types.Message):
     await profile(message)  # Вызываем уже существующую команду /profile
 
+    import datetime
+
+# Обновляем время последней активности пользователя
+def update_last_activity(user_id):
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET last_activity = CURRENT_TIMESTAMP WHERE telegram_id = ?",(user_id,))
+    conn.commit()
+    conn.close()
+
+# Вычисление дней с последней активности
+def get_last_activity_days(user_id):
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_activity FROM users WHERE telegram_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
     
+    if result and result[0]:
+        last_activity = datetime.datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
+        days_ago = (datetime.datetime.now() - last_activity).days
+        return f"{days_ago} дн. назад" if days_ago > 0 else "Сегодня"
+    return "Нет данных"
+
+# Команда /profile
+@dp.message(Command("profile"))
+async def profile(message: types.Message):
+    update_last_activity(message.from_user.id)
+
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT fa_username FROM users WHERE telegram_id = ?", (message.from_user.id,))
+    user = cursor.fetchone()
+    
+    profile_info = f"🦊 **Профиль**: {user[0] if user and user[0] else 'Не указан'}\n"
+    profile_info += f"📅 **Последняя активность**: {get_last_activity_days(message.from_user.id)}\n\n"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="edit_name")],
+        [InlineKeyboardButton(text="🔗 Изменить ссылку на FA", callback_data="edit_fa_link")],
+        [InlineKeyboardButton(text="🎨 Указать тип контента", callback_data="edit_content_type")]
+    ])
+
+    await message.answer(profile_info, reply_markup=keyboard)
+    conn.close()
+
 # Запуск бота
 async def main():
     init_db()
